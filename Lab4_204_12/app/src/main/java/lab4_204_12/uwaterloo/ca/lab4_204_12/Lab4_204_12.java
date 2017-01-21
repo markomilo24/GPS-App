@@ -1,0 +1,435 @@
+package lab4_204_12.uwaterloo.ca.lab4_204_12;
+
+import android.graphics.Path;
+import android.graphics.PointF;
+import android.graphics.Typeface;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.support.v7.app.AppCompatActivity;
+import android.os.Bundle;
+import android.util.ArraySet;
+import android.view.ContextMenu;
+import android.view.MenuItem;
+import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.Spinner;
+import android.widget.TextView;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+import mapper.*;
+
+public class Lab4_204_12 extends AppCompatActivity implements PositionListener{
+    private Pathfinding pathfinding;
+    private String[] fileNames;
+    private File fileDir = new File("/storage/0403-0201/Android/data/lab4_204_12.uwaterloo.ca.lab4_204_12/files");
+    private float metersPerStep = 0.8f;
+    private float angleTolerance = 0.1f;
+    private float distanceTolerance = 0.4f;
+    private List<PointF> path = new ArrayList<>();
+
+    // A pointer to a MapView object
+    private MapView mapView;
+
+    // A variable to keep track of our current heading
+    private float azimuth;
+
+    // [NS component, EW component] displacement in steps
+    private float[] displacement = new float[2];
+
+    // A variable to track the number of steps taken
+    private int numSteps;
+
+    //// Signal processing parameters ////
+    // attenuation: the coefficient used for the low-pass filter
+    // stepThresholds: threshold values used in step recognition algorithm
+    // shakeThreshold: value at which to determine shaking
+    private final static float attenuation = 10;
+    private final static float[] stepThresholds = new float[]{-0.4f, 0.9f};
+    private final static float shakeThreshold = 3.5f;
+
+    //// Acceleration arrays ////
+    // Arrays are of the form [X, Y, Z]
+    // smoothedAcceleration: raw acceleration data that has passed through the low-pass filter
+    // gravity: the approximate component of gravity in each axis (low-pass filter with C=100)
+    private float[] smoothedAcceleration = new float[3];
+    private float[] gravity = new float[3];
+
+    //// Enumeration of the states for the finite state machine ////
+    // INITIAL        : the initial state before any steps are taken
+    // BELOW_MIN      : the state when the vertical acceleration is below the minimum step threshold
+    // BETWEEN_RISING : the state when the vertical acceleration is between the step thresholds and rising
+    // ABOVE_MAX      : the state when the vertical acceleration is above the maximum step threshold
+    // BETWEEN_FALLING: the state when the vertical acceleration is between the step thresholds and falling
+    private enum State{
+        INITIAL, BELOW_MIN, BETWEEN_RISING, ABOVE_MAX, BETWEEN_FALLING
+    }
+
+    // Declare a variable to kep track of the state of the finite state machine
+    private State state = State.INITIAL;
+
+    @Override
+    public void originChanged(MapView source, PointF loc){
+        source.setUserPoint(loc);
+        findPath();
+    }
+
+    @Override
+    public void destinationChanged(MapView source, PointF dest){
+        findPath();
+    }
+
+    private void findPath(){
+        path = pathfinding.calculatePath();
+        mapView.setUserPath(path);
+    }
+
+    private void takeStep(){
+        numSteps++;
+
+        float angle = azimuth;
+        /*if(path.size()>0){
+            PointF currentPos = mapView.getUserPoint();
+            PointF nextPoint = path.get(path.size()-2);
+            PointF projectedPos = new PointF();
+            projectedPos.set(currentPos);
+            projectedPos.offset((float)Math.cos(azimuth), (float)Math.sin(azimuth));
+
+            float angleError = VectorUtils.angleBetween(currentPos, nextPoint, projectedPos);
+            if(Math.abs(angleError) < angleTolerance){
+                //angle = (float)Math.atan2(nextPoint.y - currentPos.y, nextPoint.x - currentPos.y);
+            }
+        }*/
+        displacement[0] += Math.cos(angle);
+        displacement[1] += Math.sin(angle);
+
+        PointF userPos = new PointF();
+        userPos.set(mapView.getUserPoint());
+        userPos.offset((float)Math.sin(angle)*metersPerStep, -(float)Math.cos(angle)*metersPerStep);
+        mapView.setUserPoint(userPos);
+
+        findPath();
+    }
+
+    private String calculateDirections(){
+        if(path.size()>0){
+            PointF currentPos = mapView.getUserPoint();
+            PointF nextPoint = path.get(path.size()-2);
+            PointF projectedPos = new PointF();
+            projectedPos.set(currentPos);
+            projectedPos.offset((float)Math.sin(azimuth), -(float)Math.cos(azimuth));
+
+            float angleError = VectorUtils.angleBetween(currentPos, nextPoint, projectedPos);
+            if(VectorUtils.distance(currentPos,mapView.getDestinationPoint())<distanceTolerance){
+                return "You have arrived";
+            }else if(Math.abs(angleError) < angleTolerance){
+                //angle = (float)Math.atan2(nextPoint.y - currentPos.y, nextPoint.x - currentPos.y);
+                return String.format("Take %d steps", path.size(), angleError, (int)Math.round(VectorUtils.distance(currentPos, nextPoint) / metersPerStep));
+            }else{
+                return String.format("Turn %d degrees %s", path.size(), angleError, (int)Math.round(Math.toDegrees(Math.abs(angleError))), angleError > 0?"left":"right");
+            }
+        }
+        return "No path";
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_lab4_204_12);
+
+        // Get a reference to the LinearLayout to add Views to
+        LinearLayout layout = (LinearLayout)findViewById(R.id.linearLayout);
+
+        // Create a button to reset the number of steps and the state machine
+        Button resetBtn = (Button)findViewById(R.id.resetButton);
+        // Set the button label
+        resetBtn.setText("Reset");
+
+        // YAY!!! Cursive font!!!
+        resetBtn.setTypeface(Typeface.create("cursive",Typeface.NORMAL));
+
+        // Set a listener on the button to reset values when it is clicked
+        resetBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                numSteps = 0;
+                displacement = new float[]{0, 0};
+                state = State.INITIAL;
+            }
+        });
+
+        mapView = new MapView(getApplicationContext(), 1500, 1200, 70, 70);
+        //mapView = new MapView(getApplicationContext(), 600, 600, 25, 25);
+        registerForContextMenu(mapView);
+        layout.addView(mapView, 0);
+        mapView.setVisibility(View.VISIBLE);
+
+        Spinner dropdown = (Spinner)findViewById(R.id.dropDownMenu);
+        //fileDir = getExternalFilesDir(null);
+        fileNames = fileDir.list();
+        System.out.println(fileDir);
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, fileNames);
+        dropdown.setAdapter(adapter);
+        dropdown.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id){
+                try{
+                    NavigationalMap map = MapLoader.loadMap(fileDir, fileNames[position]);
+                    mapView.setMap(map);
+                    mapView.setOriginPoint(new PointF(0,0));
+                    mapView.setDestinationPoint(new PointF(0,0));
+                    mapView.setUserPoint(new PointF(0,0));
+                    mapView.setUserPath(new ArrayList<PointF>());
+                    mapView.invalidate();
+                    pathfinding = Pathfinding.preProcessMap(mapView);
+                }catch(Exception e){
+                    System.out.println("Error loading map: "+fileNames[position]);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent){
+
+            }
+        });
+        mapView.addListener(this);
+
+        dropdown.setSelection(1);
+
+        // Get a reference to the sensor manager
+        SensorManager sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        // Get the default accelerometer and magnetic field sensor
+        Sensor accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        Sensor magneticSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        // Create an instance of the ComboSensorListener class and register listeners with the sensor manager
+        SensorEventListener comboListener = new ComboSensorListener((TextView) findViewById(R.id.accelerometerLabel));
+        sensorManager.registerListener(comboListener, accelerometer, SensorManager.SENSOR_DELAY_FASTEST);
+        sensorManager.registerListener(comboListener, magneticSensor, SensorManager.SENSOR_DELAY_FASTEST);
+    }
+
+    @Override
+    public void onCreateContextMenu(ContextMenu menu , View v, ContextMenu.ContextMenuInfo menuInfo){
+        super.onCreateContextMenu(menu , v, menuInfo);
+        mapView.onCreateContextMenu(menu , v, menuInfo);
+    }
+
+    @Override
+    public boolean onContextItemSelected(MenuItem item){
+        return super.onContextItemSelected(item) ||  mapView.onContextItemSelected(item);
+    }
+
+    //// ComboSensorListener ////
+    // A custom concrete class that must implement all of the methods in the SensorEventListener interface
+    // It also keeps track and updates the current acceleration values, and updates the state machine
+    private class ComboSensorListener implements SensorEventListener{
+        // An instance of LineGraphView to plot values on
+//        private LineGraphView graph;
+
+        // A TextView object to display the number of steps
+        private TextView output;
+
+        // A constructor that takes a LineGraphView and TextView as arguments
+        public ComboSensorListener(TextView output){
+            // Initialize class fields
+            this.output = output;
+        }
+
+        // Override the onAccuracyChanged method because we have to...
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        }
+
+        //// Main fanciness method (other than runStateMachine) ////
+        // This method is called whenever the listener receives an update
+        // It calculates the new acceleration values, plots them on the graph, runs the state machine
+        // and updates the TextView
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+
+            // Only do stuff if the event was generated by a sensor of type Sensor.TYPE_ACCELEROMETER
+            if(event.sensor.getType() == Sensor.TYPE_ACCELEROMETER){
+                // Since some of our phones did not have linear acceleration or rotation sensors
+                //  some fancy math was needed to allow the pedometer to perform for any phone orientation
+                //  this would have been much simpler otherwise
+
+                // Sum of the absolute values of the "average" value for each axis (~gravity)
+                double currGravity = (Math.abs(gravity[0])+Math.abs(gravity[1])+Math.abs(gravity[2]));
+
+                // Arrays to store calculated rotation angles and intermediate acceleration values
+                float[] rotationAngles = new float[3];
+                float[] correctedAcceleration = new float[3];
+
+                // Loop through the X, Y and Z axis calculating acceleration and rotation values
+                for(int i=0; i<3; i++){
+                    // Update the smoothedAcceleration variable using the formula given in the manual
+                    smoothedAcceleration[i] += (event.values[i] - smoothedAcceleration[i])/attenuation;
+                    // Update the approximate gravity value (strong low-pass filter)
+                    gravity[i] += (event.values[i] - gravity[i])/100;
+                    // Shift the smoothedAcceleration to center it around zero
+                    correctedAcceleration[i] = smoothedAcceleration[i]-gravity[i];
+                    // Use trigonometry to calculate the angle by which each axis is displaced from vertical
+                    rotationAngles[i] = (float)Math.acos(gravity[i]/currGravity);
+                }
+
+                // Calculate the total vertical acceleration by summing the vertical component of all axis
+                float correctedVerticalAcceleration = (float)(correctedAcceleration[0]*Math.cos(rotationAngles[0])+correctedAcceleration[1]*Math.cos(rotationAngles[1])+correctedAcceleration[2]*Math.cos(rotationAngles[2]));
+
+                // Run the state machine that determines if a step has been taken
+                boolean stepTaken = runStateMachine(correctedVerticalAcceleration);
+
+                // Update the textView and calculate new displacement if a step has been taken
+                if(stepTaken) {
+                    takeStep();
+                }
+
+                char directionOutput='N';
+                if (azimuth <= 0.75 && azimuth >= -0.75){
+                    directionOutput = 'N';
+                } else if (azimuth > 0.75 && azimuth < 2.25){
+                    directionOutput = 'E';
+                } else if (azimuth < -0.75 && azimuth > -2.25){
+                    directionOutput = 'W';
+                } else{ // facing south
+                    directionOutput = 'S';
+                }
+
+                output.setText(String.format(Locale.getDefault(),
+                        "%s\n" +
+                        "Steps: %d\n" +
+                        "Azimuth: %.3f\n" +
+                        "Direction: %c\n\n" +
+                        "" +
+                        "Displacement:\n" +
+                        "  North: %.3f\n" +
+                        "  East: %.3f\n" +
+                        "  Net: %.3f  (%.3f)",
+                        calculateDirections(), numSteps, azimuth, directionOutput, displacement[0], displacement[1],
+                        Math.sqrt(displacement[0]*displacement[0]+displacement[1]*displacement[1]),
+                        Math.atan2(displacement[1],displacement[0])
+                ));
+            // If we are getting updated by the magnetic field sensor update the correct variables
+            }else if(event.sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD){
+                // empty arrays to be passed to getRotationMatrix method
+                float[] R = new float[9];
+                float[] I = new float[9];
+
+                // define a local boolean variable saying whether the getRotationMatrix operation was successful
+                boolean success = SensorManager.getRotationMatrix(R, I, gravity, event.values);
+
+                if(success){
+                    // orientation = [azimuth, pitch, roll]
+                    float[] orientation = new float[3];
+
+                    // compute the device's orientation based on the rotation matrix
+                    SensorManager.getOrientation(R, orientation);
+
+                    // difference between the new device orientation and our current heading
+                    float dTheta = orientation[0] - azimuth;
+
+                    // make sure the difference is less than +- PI/2
+                    if(dTheta > Math.PI){
+                        // negative to positive
+                        dTheta -= 2 * Math.PI;
+                    }else if(dTheta < -Math.PI){
+                        // positive to negative
+                        dTheta += 2 * Math.PI;
+                    }
+
+                    // calculate the new heading using a low-pass filter
+                    azimuth = azimuth + dTheta / 10;
+
+                    // make sure the new heading is within expected boundaries
+                    if(azimuth < -Math.PI){
+                        azimuth += 2 * Math.PI;
+                    }else if(azimuth > Math.PI){
+                        azimuth -= 2 * Math.PI;
+                    }
+
+                    mapView.setRotation((float)Math.toDegrees(-azimuth));
+                }
+            }
+        }
+    }
+
+    //// runStateMachine ////
+    // This method handles all state changes and returns a boolean value indicating if a step has occurred
+    // The argument to this method is a float indicating the current vertical acceleration
+    private boolean runStateMachine(float currentVerticalAcceleration){
+        // Declare a boolean variable to indicate if a step has been taken
+        boolean stepTaken = false;
+
+        // Handle state changes
+        switch (state){
+
+            // INITIAL state
+            // The initial state of the state machine, entered only on onCreate(), when
+            // the reset button is pressed or if shaking is detected
+            case INITIAL:
+                // When the vertical acceleration passes below the minimum step threshold move to the BELOW_MIN state
+                if(currentVerticalAcceleration < stepThresholds[0]){
+                    state = State.BELOW_MIN;
+                }
+                break;
+
+            // BELOW_MIN state
+            // This state indicates that the acceleration waveform is below the minimum step threshold
+            // Entered from INITIAL or BETWEEN_FALLING
+            case BELOW_MIN:
+                // When the vertical acceleration surpasses the minimum step threshold switch to the BETWEEN_RISING state
+                if(currentVerticalAcceleration > stepThresholds[0]){
+                    state = State.BETWEEN_RISING;
+                }
+                break;
+
+            // BETWEEN_RISING state
+            // This state indicates that the vertical acceleration is between the step thresholds and should be rising
+            // Entered only from BELOW_MIN
+            case BETWEEN_RISING:
+                // Switch to the ABOVE_MAX state when the vertical acceleration goes above the maximum step threshold
+                if(currentVerticalAcceleration > stepThresholds[1]){
+                    state = State.ABOVE_MAX;
+                }
+                break;
+
+            // ABOVE_MAX state
+            // This state indicates that the vertical acceleration is above the maximum step threshold
+            // Entered only from BETWEEN_RISING
+            case ABOVE_MAX:
+                // If the vertical acceleration is above the shake threshold switch the
+                // state to INITIAL because the user is most likely shaking the device
+                if(currentVerticalAcceleration > shakeThreshold){
+                    state = State.INITIAL;// Go to INITIAL do not pass go!
+                }
+                // If the vertical acceleration is below the max step threshold switch the state
+                // to BETWEEN_FALLING and indicate that a step has occurred
+                else if(currentVerticalAcceleration < stepThresholds[1]){
+                    state = State.BETWEEN_FALLING;
+                    stepTaken = true;
+                }
+                break;
+
+            // BETWEEN_FALLING state
+            // This state indicates that the vertical acceleration is between the step thresholds and should be falling
+            case BETWEEN_FALLING:
+                // When the vertical acceleration passes below the minimum step threshold switch the state to BELOW_MIN
+                if(currentVerticalAcceleration < stepThresholds[0]){
+                    state = State.BELOW_MIN;
+                }
+                break;
+        }
+
+        // Tell the caller if a step has occurred
+        return stepTaken;
+    }
+}
+
